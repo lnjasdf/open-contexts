@@ -70,22 +70,28 @@ final class AppSettings: ObservableObject {
     @Published private(set) var language: AppLanguage
     @Published private(set) var allWindowsShortcut: KeyboardShortcut
     @Published private(set) var currentAppShortcut: KeyboardShortcut
+    @Published private(set) var reverseShortcut: KeyboardShortcut
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        func loadShortcut(_ key: String, fallback: KeyboardShortcut) -> KeyboardShortcut {
-            guard let data = defaults.data(forKey: key),
+        func loadShortcut(_ scope: ShortcutScope) -> KeyboardShortcut {
+            guard let data = defaults.data(forKey: scope.defaultsKey),
                   let shortcut = try? JSONDecoder().decode(KeyboardShortcut.self, from: data),
-                  shortcut.isValid else { return fallback }
+                  shortcut.isValid(allowingShift: scope.allowsShift) else { return scope.defaultShortcut }
             return shortcut
         }
-        let allWindows = loadShortcut("allWindowsShortcut", fallback: .allWindows)
-        let currentApp = loadShortcut("currentAppShortcut", fallback: .currentApp)
-        let conflict = allWindows.conflicts(with: currentApp)
-        allWindowsShortcut = conflict ? .allWindows : allWindows
-        currentAppShortcut = conflict ? .currentApp : currentApp
+        let allWindows = loadShortcut(.allWindows)
+        let currentApp = loadShortcut(.currentApp)
+        let reverse = loadShortcut(.reverse)
+        // A saved value that collides with another key falls back instead of stealing both gestures.
+        let conflictsAllWindows = currentApp.conflicts(with: allWindows) || reverse.conflicts(with: allWindows)
+        let conflictsCurrentApp = allWindows.conflicts(with: currentApp) || reverse.conflicts(with: currentApp)
+        let conflictsReverse = allWindows.conflicts(with: reverse) || currentApp.conflicts(with: reverse)
+        allWindowsShortcut = conflictsAllWindows ? .allWindows : allWindows
+        currentAppShortcut = conflictsCurrentApp ? .currentApp : currentApp
+        reverseShortcut = conflictsReverse ? .reverse : reverse
         language = AppLanguage(rawValue: defaults.string(forKey: "language") ?? "") ?? .system
         sidebarMode = SidebarVisibilityMode(rawValue: defaults.string(forKey: "sidebarMode") ?? "") ?? .always
         sidebarVerticalAlignment = SidebarVerticalAlignment(
@@ -150,25 +156,34 @@ final class AppSettings: ObservableObject {
         defaults.set(language.rawValue, forKey: "language")
     }
 
-    @discardableResult
-    func setShortcut(_ shortcut: KeyboardShortcut, currentAppOnly: Bool) -> Bool {
-        let other = currentAppOnly ? allWindowsShortcut : currentAppShortcut
-        guard shortcut.isValid, !shortcut.conflicts(with: other),
-              let data = try? JSONEncoder().encode(shortcut) else { return false }
-        if currentAppOnly {
-            currentAppShortcut = shortcut
-        } else {
-            allWindowsShortcut = shortcut
+    func shortcut(for scope: ShortcutScope) -> KeyboardShortcut {
+        switch scope {
+        case .allWindows: allWindowsShortcut
+        case .currentApp: currentAppShortcut
+        case .reverse: reverseShortcut
         }
-        defaults.set(data, forKey: currentAppOnly ? "currentAppShortcut" : "allWindowsShortcut")
+    }
+
+    @discardableResult
+    func setShortcut(_ shortcut: KeyboardShortcut, scope: ShortcutScope) -> Bool {
+        let others = ShortcutScope.allCases.filter { $0 != scope }
+        guard shortcut.isValid(allowingShift: scope.allowsShift),
+              others.allSatisfy({ !shortcut.conflicts(with: self.shortcut(for: $0)) }),
+              let data = try? JSONEncoder().encode(shortcut) else { return false }
+        switch scope {
+        case .allWindows: allWindowsShortcut = shortcut
+        case .currentApp: currentAppShortcut = shortcut
+        case .reverse: reverseShortcut = shortcut
+        }
+        defaults.set(data, forKey: scope.defaultsKey)
         return true
     }
 
     func resetShortcuts() {
         allWindowsShortcut = .allWindows
         currentAppShortcut = .currentApp
-        defaults.removeObject(forKey: "allWindowsShortcut")
-        defaults.removeObject(forKey: "currentAppShortcut")
+        reverseShortcut = .reverse
+        ShortcutScope.allCases.forEach { defaults.removeObject(forKey: $0.defaultsKey) }
     }
 
     static func selfCheck() -> Bool {
@@ -229,23 +244,38 @@ final class AppSettings: ObservableObject {
         defaults.set("unsupported", forKey: "language")
         guard AppSettings(defaults: defaults).language == .system else { return false }
         let custom = KeyboardShortcut(keyCode: 16, modifiers: [.maskControl, .maskAlternate], keyLabel: "Y")
+        let customReverse = KeyboardShortcut(keyCode: 48, modifiers: [.maskCommand, .maskAlternate, .maskShift],
+                                             keyLabel: "Tab")
         guard settings.allWindowsShortcut == .allWindows, settings.currentAppShortcut == .currentApp,
-              !settings.setShortcut(.currentApp, currentAppOnly: false),
-              settings.setShortcut(custom, currentAppOnly: false),
+              settings.reverseShortcut == .reverse,
+              !settings.setShortcut(.currentApp, scope: .allWindows),
+              settings.setShortcut(custom, scope: .allWindows),
               AppSettings(defaults: defaults).allWindowsShortcut == custom,
-              !settings.setShortcut(custom, currentAppOnly: true),
+              !settings.setShortcut(custom, scope: .currentApp),
               settings.setShortcut(KeyboardShortcut(keyCode: 16, modifiers: .maskCommand, keyLabel: "Y"),
-                                   currentAppOnly: true),
-              AppSettings(defaults: defaults).currentAppShortcut.keyCode == 16 else { return false }
+                                   scope: .currentApp),
+              AppSettings(defaults: defaults).currentAppShortcut.keyCode == 16,
+              // Shift belongs to the reverse key alone.
+              !settings.setShortcut(customReverse, scope: .allWindows),
+              !settings.setShortcut(customReverse, scope: .currentApp),
+              settings.setShortcut(customReverse, scope: .reverse),
+              AppSettings(defaults: defaults).reverseShortcut == customReverse,
+              settings.setShortcut(.reverse, scope: .reverse),
+              AppSettings(defaults: defaults).reverseShortcut == .reverse else { return false }
         // Corrupt or conflicting saved values fall back to the original shortcuts.
         defaults.set(try? JSONEncoder().encode(custom), forKey: "currentAppShortcut")
         guard AppSettings(defaults: defaults).allWindowsShortcut == .allWindows,
               AppSettings(defaults: defaults).currentAppShortcut == .currentApp else { return false }
         defaults.set(Data("invalid".utf8), forKey: "allWindowsShortcut")
         guard AppSettings(defaults: defaults).allWindowsShortcut == .allWindows else { return false }
+        defaults.set(try? JSONEncoder().encode(KeyboardShortcut.allWindows), forKey: "reverseShortcut")
+        guard AppSettings(defaults: defaults).reverseShortcut == .reverse else { return false }
+        defaults.set(try? JSONEncoder().encode(customReverse), forKey: "reverseShortcut")
+        guard AppSettings(defaults: defaults).reverseShortcut == customReverse else { return false }
         settings.resetShortcuts()
         return AppSettings(defaults: defaults).allWindowsShortcut == .allWindows
             && AppSettings(defaults: defaults).currentAppShortcut == .currentApp
+            && AppSettings(defaults: defaults).reverseShortcut == .reverse
             && settings.sidebarPosition == .left
             && settings.sidebarItemDisplayMode == .icon
             && defaults.string(forKey: "sidebarPosition") == SidebarPosition.left.rawValue
@@ -456,11 +486,14 @@ struct SettingsView: View {
 
     private var shortcutSettings: some View {
         Group {
-            settingsRow("All windows") { shortcutButton(currentAppOnly: false) }
-            settingsRow("Current app windows") { shortcutButton(currentAppOnly: true) }
+            settingsRow("All windows") { shortcutButton(scope: .allWindows) }
+            settingsRow("Current app windows") { shortcutButton(scope: .currentApp) }
+            settingsRow("Reverse switch") { shortcutButton(scope: .reverse) }
             settingsRow("Shortcuts") {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(L10n.text("Click a shortcut to record. Esc cancels; Shift switches backward.", language: language))
+                    Text(L10n.text("Click a shortcut to record. Esc cancels.", language: language))
+                        .foregroundStyle(.secondary)
+                    Text(L10n.text("The reverse key steps one window back inside a switcher that is already open; it never opens one.", language: language))
                         .foregroundStyle(.secondary)
                     Button(L10n.text("Restore defaults", language: language)) {
                         shortcuts.cancelRecording()
@@ -474,19 +507,17 @@ struct SettingsView: View {
         }
     }
 
-    private func shortcutButton(currentAppOnly: Bool) -> some View {
-        let recording = shortcuts.recordingCurrentAppOnly == currentAppOnly
-        let shortcut = currentAppOnly ? settings.currentAppShortcut : settings.allWindowsShortcut
+    private func shortcutButton(scope: ShortcutScope) -> some View {
+        let recording = shortcuts.recordingScope == scope
+        let shortcut = settings.shortcut(for: scope)
         return Button(recording ? L10n.text("Press shortcut…", language: settings.language) : shortcut.display) {
             if recording {
                 shortcuts.cancelRecording()
             } else {
-                shortcuts.beginRecording(currentAppOnly: currentAppOnly) { shortcut in
-                    settings.setShortcut(shortcut, currentAppOnly: currentAppOnly)
-                }
+                shortcuts.beginRecording(scope: scope) { settings.setShortcut($0, scope: scope) }
             }
         }
-        .accessibilityLabel(L10n.text(currentAppOnly ? "Current app windows" : "All windows", language: settings.language))
+        .accessibilityLabel(L10n.text(scope.labelKey, language: settings.language))
         .accessibilityValue(recording ? L10n.text("Press shortcut…", language: settings.language) : shortcut.display)
     }
 

@@ -48,7 +48,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func configureShortcuts() {
-        shortcuts.configure(allWindows: settings.allWindowsShortcut, currentApp: settings.currentAppShortcut)
+        shortcuts.configure(allWindows: settings.allWindowsShortcut, currentApp: settings.currentAppShortcut,
+                            reverse: settings.reverseShortcut)
         shortcuts.canBegin = { [weak self] currentAppOnly in
             self?.availableWindows(currentAppOnly: currentAppOnly).isEmpty == false
         }
@@ -94,7 +95,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.configureMenuBar()
                 if let self {
                     self.shortcuts.configure(allWindows: self.settings.allWindowsShortcut,
-                                             currentApp: self.settings.currentAppShortcut)
+                                             currentApp: self.settings.currentAppShortcut,
+                                             reverse: self.settings.reverseShortcut)
                     self.settingsWindow?.title = L10n.text("OpenContexts Settings", language: self.settings.language)
                     if self.currentAppOnly != nil { self.updateSwitchers() }
                 }
@@ -178,7 +180,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handle(_ action: SwitcherAction) {
         switch action {
-        case let .begin(currentAppOnly, reverse):
+        case let .begin(currentAppOnly):
             searchQuery = ""
             selectionBeforeSearch = nil
             self.currentAppOnly = currentAppOnly
@@ -187,7 +189,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                                     query: "")
             switchingWindowCount = switchingResults.count
             guard !switchingResults.isEmpty else { return }
-            selectedIndex = reverse ? switchingResults.count - 1 : min(1, switchingResults.count - 1)
+            selectedIndex = min(1, switchingResults.count - 1)
             switchers.values.forEach {
                 $0.show(results: switchingResults, selectedIndex: selectedIndex,
                         totalWindowCount: switchingWindowCount, language: settings.language)

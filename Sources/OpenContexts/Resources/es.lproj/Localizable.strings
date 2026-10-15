@@ -49,9 +49,12 @@
 "Move group to end" = "Mover grupo al final";
 "Press shortcut…" = "Pulsa el atajo…";
 "Restore defaults" = "Restaurar valores";
-"Click a shortcut to record. Esc cancels; Shift switches backward." = "Haz clic para grabar. Esc cancela; Mayús cambia hacia atrás.";
-"The two shortcuts must be different." = "Los dos atajos deben ser diferentes.";
-"Use Command, Option or Control with a key; Shift is reserved for reverse switching." = "Usa Comando, Opción o Control con una tecla; Mayús se reserva para cambiar hacia atrás.";
+"Reverse switch" = "Cambio inverso";
+"Click a shortcut to record. Esc cancels." = "Haz clic para grabar. Esc cancela.";
+"The reverse key steps one window back inside a switcher that is already open; it never opens one." = "La tecla inversa retrocede una ventana dentro del selector ya abierto; nunca lo abre.";
+"The shortcuts must be different." = "Los atajos deben ser diferentes.";
+"Use Command, Option, or Control with a key." = "Usa Comando, Opción o Control con una tecla.";
+"Use Command, Option, Control, or Shift with a key." = "Usa Comando, Opción, Control o Mayús con una tecla.";
 "Type an app name or window title" = "Escribe un nombre de app o título de ventana";
 "Window search" = "Buscar ventanas";
 "%@ windows" = "%@ ventanas";

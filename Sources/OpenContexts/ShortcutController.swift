@@ -4,8 +4,14 @@ import Combine
 
 struct KeyboardShortcut: Codable, Equatable {
     static let modifierMask: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate]
+    /// Shift counts for the reverse switch key only; the keys that open a switcher may not carry it.
+    static let reverseModifierMask: CGEventFlags = modifierMask.union(.maskShift)
+    /// Left and right Shift arrive as flagsChanged, not keyDown, so a Shift tap is stored as the left key.
+    static let shiftKeyCode: UInt16 = 56
+    static let shiftKeyCodes: Set<UInt16> = [56, 60]
     static let allWindows = KeyboardShortcut(keyCode: 48, modifiers: .maskCommand, keyLabel: "Tab")
     static let currentApp = KeyboardShortcut(keyCode: 50, modifiers: .maskCommand, keyLabel: "`")
+    static let reverse = KeyboardShortcut(keyCode: shiftKeyCode, modifiers: .maskCommand, keyLabel: "⇧")
 
     let keyCode: UInt16
     let modifierRawValue: UInt64
@@ -18,28 +24,48 @@ struct KeyboardShortcut: Codable, Equatable {
     }
 
     var modifiers: CGEventFlags { CGEventFlags(rawValue: modifierRawValue) }
-    var isValid: Bool {
-        keyCode < 128 && keyCode != 53 && !(54...63).contains(keyCode)
-            && !modifiers.isEmpty && modifiers.subtracting(Self.modifierMask).isEmpty
+    var isShiftTap: Bool { keyCode == Self.shiftKeyCode }
+    var isValid: Bool { isValid(allowingShift: false) }
+    func isValid(allowingShift: Bool) -> Bool {
+        keyCode < 128 && (allowingShift && isShiftTap || keyCode != 53 && !(54...63).contains(keyCode))
+            && !modifiers.isEmpty && modifiers.subtracting(Self.mask(allowingShift: allowingShift)).isEmpty
             && !keyLabel.isEmpty && keyLabel.count <= 20
     }
     var display: String {
         (modifiers.contains(.maskControl) ? "⌃" : "")
             + (modifiers.contains(.maskAlternate) ? "⌥" : "")
-            + (modifiers.contains(.maskCommand) ? "⌘" : "") + keyLabel
+            + (modifiers.contains(.maskCommand) ? "⌘" : "")
+            + (modifiers.contains(.maskShift) && !isShiftTap ? "⇧" : "") + keyLabel
     }
 
     func matches(keyCode: UInt16, flags: CGEventFlags) -> Bool {
-        self.keyCode == keyCode && flags.intersection(Self.modifierMask) == modifiers
+        self.keyCode == keyCode && flags.intersection(Self.reverseModifierMask) == modifiers
+    }
+
+    /// A Shift tap fires while every modifier the shortcut records stays down.
+    func matchesShiftTap(flags: CGEventFlags) -> Bool {
+        isShiftTap && flags.contains(.maskShift) && modifiers.isSubset(of: flags)
     }
 
     func conflicts(with other: KeyboardShortcut) -> Bool {
         keyCode == other.keyCode && modifierRawValue == other.modifierRawValue
     }
 
-    init?(event: NSEvent) {
+    private static func mask(allowingShift: Bool) -> CGEventFlags {
+        allowingShift ? reverseModifierMask : modifierMask
+    }
+
+    init?(event: NSEvent, allowingShift: Bool = false) {
         let flags = CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue))
-        guard !flags.contains(.maskShift) else { return nil }
+        if event.type == .flagsChanged {
+            guard allowingShift, Self.shiftKeyCodes.contains(event.keyCode), flags.contains(.maskShift) else {
+                return nil
+            }
+            self.init(keyCode: Self.shiftKeyCode, modifiers: flags.intersection(Self.modifierMask), keyLabel: "⇧")
+            guard isValid(allowingShift: true) else { return nil }
+            return
+        }
+        guard allowingShift || !flags.contains(.maskShift) else { return nil }
         let names: [UInt16: String] = [
             36: "↩", 48: "Tab", 49: "Space", 51: "⌫", 76: "⌤", 117: "⌦",
             123: "←", 124: "→", 125: "↓", 126: "↑", 115: "↖", 119: "↘", 116: "⇞", 121: "⇟"
@@ -50,17 +76,47 @@ struct KeyboardShortcut: Codable, Equatable {
         ]
         let label = names[event.keyCode] ?? functionKeys[event.keyCode].map { "F\($0)" }
             ?? event.characters(byApplyingModifiers: [])?.uppercased() ?? ""
-        self.init(keyCode: event.keyCode, modifiers: flags.intersection(Self.modifierMask), keyLabel: label)
-        guard isValid else { return nil }
+        self.init(keyCode: event.keyCode, modifiers: flags.intersection(Self.reverseModifierMask), keyLabel: label)
+        guard isValid(allowingShift: allowingShift) else { return nil }
     }
 }
 
 enum SwitcherAction: Equatable {
-    case begin(currentAppOnly: Bool, reverse: Bool)
+    case begin(currentAppOnly: Bool)
     case step(Int)
     case search(String)
     case commit
     case cancel
+}
+
+enum ShortcutScope: String, Equatable, CaseIterable {
+    case allWindows, currentApp, reverse
+
+    var labelKey: String {
+        switch self {
+        case .allWindows: "All windows"
+        case .currentApp: "Current app windows"
+        case .reverse: "Reverse switch"
+        }
+    }
+
+    var defaultsKey: String {
+        switch self {
+        case .allWindows: "allWindowsShortcut"
+        case .currentApp: "currentAppShortcut"
+        case .reverse: "reverseShortcut"
+        }
+    }
+
+    var allowsShift: Bool { self == .reverse }
+
+    var defaultShortcut: KeyboardShortcut {
+        switch self {
+        case .allWindows: .allWindows
+        case .currentApp: .currentApp
+        case .reverse: .reverse
+        }
+    }
 }
 
 private struct ShortcutState {
@@ -68,13 +124,13 @@ private struct ShortcutState {
     private(set) var heldModifiers: CGEventFlags = []
     private(set) var searchQuery = ""
 
-    mutating func begin(currentAppOnly: Bool, reverse: Bool, allowed: Bool,
+    mutating func begin(currentAppOnly: Bool, allowed: Bool,
                         modifiers: CGEventFlags = .maskCommand) -> SwitcherAction? {
         guard !isSwitching, allowed else { return nil }
         isSwitching = true
         heldModifiers = modifiers
         searchQuery = ""
-        return .begin(currentAppOnly: currentAppOnly, reverse: reverse)
+        return .begin(currentAppOnly: currentAppOnly)
     }
 
     mutating func step(_ amount: Int) -> SwitcherAction? {
@@ -106,37 +162,45 @@ private struct ShortcutState {
 @MainActor
 final class ShortcutController: ObservableObject {
     @Published private(set) var isRunning = false
-    @Published private(set) var recordingCurrentAppOnly: Bool?
+    @Published private(set) var recordingScope: ShortcutScope?
     @Published private(set) var recordingErrorKey: String?
     var onAction: ((SwitcherAction) -> Void)?
     var canBegin: ((Bool) -> Bool)?
     private(set) var allWindowsShortcut = KeyboardShortcut.allWindows
     private(set) var currentAppShortcut = KeyboardShortcut.currentApp
+    private(set) var reverseShortcut = KeyboardShortcut.reverse
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var state = ShortcutState()
+    private var shiftIsHeld = false
     private var recordingMonitor: Any?
     private var saveRecording: ((KeyboardShortcut) -> Bool)?
 
-    func configure(allWindows: KeyboardShortcut, currentApp: KeyboardShortcut) {
-        guard allWindows.isValid, currentApp.isValid, !allWindows.conflicts(with: currentApp),
-              allWindows != allWindowsShortcut || currentApp != currentAppShortcut else { return }
+    func configure(allWindows: KeyboardShortcut, currentApp: KeyboardShortcut, reverse: KeyboardShortcut) {
+        guard allWindows.isValid, currentApp.isValid, reverse.isValid(allowingShift: true),
+              !allWindows.conflicts(with: currentApp), !allWindows.conflicts(with: reverse),
+              !currentApp.conflicts(with: reverse),
+              allWindows != allWindowsShortcut || currentApp != currentAppShortcut
+                  || reverse != reverseShortcut else { return }
         if let action = state.finish(commit: false) { onAction?(action) }
         allWindowsShortcut = allWindows
         currentAppShortcut = currentApp
+        reverseShortcut = reverse
     }
 
-    func beginRecording(currentAppOnly: Bool, onSave: @escaping (KeyboardShortcut) -> Bool) {
+    func beginRecording(scope: ShortcutScope, onSave: @escaping (KeyboardShortcut) -> Bool) {
         cancelRecording()
         if let action = state.finish(commit: false) { onAction?(action) }
-        recordingCurrentAppOnly = currentAppOnly
+        recordingScope = scope
         saveRecording = onSave
+        // A Shift tap only arrives as flagsChanged, which the reverse key accepts.
+        let monitored: NSEvent.EventTypeMask = scope.allowsShift ? [.keyDown, .flagsChanged] : .keyDown
         // Also records in Settings before Accessibility permission is granted.
-        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        recordingMonitor = NSEvent.addLocalMonitorForEvents(matching: monitored) { [weak self] event in
             let captured = MainActor.assumeIsolated {
-                guard let self, self.recordingCurrentAppOnly != nil else { return false }
+                guard let self, self.recordingScope != nil else { return false }
                 self.record(event)
                 return true
             }
@@ -148,22 +212,32 @@ final class ShortcutController: ObservableObject {
         if let recordingMonitor { NSEvent.removeMonitor(recordingMonitor) }
         recordingMonitor = nil
         saveRecording = nil
-        recordingCurrentAppOnly = nil
+        recordingScope = nil
         recordingErrorKey = nil
     }
 
     private func record(_ event: NSEvent) {
-        guard recordingCurrentAppOnly != nil, !event.isARepeat else { return }
+        // isARepeat only answers for keyDown and keyUp; a Shift tap arrives as flagsChanged.
+        let isRepeat = event.type == .keyDown && event.isARepeat
+        guard let scope = recordingScope, !isRepeat else { return }
+        if event.type == .flagsChanged {
+            // Only a Shift press can stand in as the reverse key; other modifier transitions are composing noise.
+            guard KeyboardShortcut.shiftKeyCodes.contains(event.keyCode), event.modifierFlags.contains(.shift) else {
+                return
+            }
+        }
         if event.keyCode == 53 {
             cancelRecording()
-        } else if let shortcut = KeyboardShortcut(event: event) {
+        } else if let shortcut = KeyboardShortcut(event: event, allowingShift: scope.allowsShift) {
             if saveRecording?(shortcut) == true {
                 cancelRecording()
             } else {
-                recordingErrorKey = "The two shortcuts must be different."
+                recordingErrorKey = "The shortcuts must be different."
             }
         } else {
-            recordingErrorKey = "Use Command, Option or Control with a key; Shift is reserved for reverse switching."
+            recordingErrorKey = scope.allowsShift
+                ? "Use Command, Option, Control, or Shift with a key."
+                : "Use Command, Option, or Control with a key."
         }
     }
 
@@ -235,12 +309,16 @@ final class ShortcutController: ObservableObject {
 
         let flags = event.flags
         if type == .flagsChanged {
-            if let action = modifierAction(flags: flags) { emit(action, deferred: true) }
+            let pressedShift = flags.contains(.maskShift) && !shiftIsHeld
+            shiftIsHeld = flags.contains(.maskShift)
+            let action = reverseShiftAction(flags: flags, pressedShift: pressedShift) ?? modifierAction(flags: flags)
+            if let action { emit(action, deferred: true) }
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
+        shiftIsHeld = flags.contains(.maskShift)
 
-        if recordingCurrentAppOnly != nil {
+        if recordingScope != nil {
             // Defer AppKit/UI work until after the event tap returns, and swallow even ⌘Tab.
             if let keyEvent = NSEvent(cgEvent: event) {
                 DispatchQueue.main.async { [weak self] in self?.record(keyEvent) }
@@ -264,20 +342,29 @@ final class ShortcutController: ObservableObject {
         return state.finish(commit: true)
     }
 
+    /// Tapping Shift inside an open switcher steps back; holding or releasing it does nothing.
+    private func reverseShiftAction(flags: CGEventFlags, pressedShift: Bool) -> SwitcherAction? {
+        guard pressedShift, state.isSwitching, reverseShortcut.matchesShiftTap(flags: flags) else { return nil }
+        return state.step(-1)
+    }
+
     private static func searchCharacters(_ event: NSEvent) -> String? {
         event.characters(byApplyingModifiers: event.modifierFlags.intersection([.shift, .capsLock]))
     }
 
     private func keyAction(keyCode: UInt16, flags: CGEventFlags, characters: String? = nil) -> SwitcherAction? {
         if state.isSwitching {
+            if reverseShortcut.matches(keyCode: keyCode, flags: flags) {
+                return state.step(-1)
+            }
             if state.searchQuery.isEmpty,
                allWindowsShortcut.matches(keyCode: keyCode, flags: flags)
                 || currentAppShortcut.matches(keyCode: keyCode, flags: flags) {
-                return state.step(flags.contains(.maskShift) ? -1 : 1)
+                return state.step(1)
             }
             switch keyCode {
             case 48, 50:
-                return state.step(flags.contains(.maskShift) ? -1 : 1)
+                return flags.contains(.maskShift) ? nil : state.step(1)
             case 126:
                 return state.step(-1)
             case 125:
@@ -300,12 +387,12 @@ final class ShortcutController: ObservableObject {
             currentAppOnly = true
             shortcut = currentAppShortcut
         } else {
+            // The reverse key steps inside an open switcher; it never opens one.
             return nil
         }
 
         return state.begin(
             currentAppOnly: currentAppOnly,
-            reverse: flags.contains(.maskShift),
             allowed: canBegin?(currentAppOnly) ?? true,
             modifiers: shortcut.modifiers
         )
@@ -347,48 +434,65 @@ final class ShortcutController: ObservableObject {
         var state = ShortcutState()
         guard KeyboardShortcut.allWindows.display == "⌘Tab",
               KeyboardShortcut.currentApp.display == "⌘`",
-              state.begin(currentAppOnly: false, reverse: false, allowed: false) == nil,
-              state.begin(currentAppOnly: false, reverse: false, allowed: true) == .begin(currentAppOnly: false, reverse: false),
+              KeyboardShortcut.reverse.display == "⌘⇧", KeyboardShortcut.reverse.isShiftTap,
+              KeyboardShortcut(keyCode: 56, modifiers: .maskCommand, keyLabel: "⇧").isValid(allowingShift: true),
+              !KeyboardShortcut(keyCode: 56, modifiers: .maskCommand, keyLabel: "⇧").isValid,
+              KeyboardShortcut(keyCode: 56, modifiers: [], keyLabel: "⇧").isValid(allowingShift: true) == false,
+              state.begin(currentAppOnly: false, allowed: false) == nil,
+              state.begin(currentAppOnly: false, allowed: true) == .begin(currentAppOnly: false),
               state.step(1) == .step(1),
               state.finish(commit: false) == .cancel,
-              state.begin(currentAppOnly: true, reverse: true, allowed: true) == .begin(currentAppOnly: true, reverse: true),
+              state.begin(currentAppOnly: true, allowed: true) == .begin(currentAppOnly: true),
               state.finish(commit: true) == .commit,
-              state.finish(commit: true) == nil else { return false }
+              state.finish(commit: true) == nil,
+              KeyboardShortcut.reverse.isValid(allowingShift: true), !KeyboardShortcut.reverse.isValid,
+              KeyboardShortcut(keyCode: 16, modifiers: [.maskCommand, .maskShift], keyLabel: "Y")
+                  .isValid(allowingShift: true),
+              !KeyboardShortcut(keyCode: 16, modifiers: [.maskCommand, .maskShift], keyLabel: "Y").isValid,
+              !KeyboardShortcut(keyCode: 16, modifiers: [], keyLabel: "Y").isValid,
+              !KeyboardShortcut(keyCode: 53, modifiers: .maskCommand, keyLabel: "Esc").isValid else { return false }
 
         let controller = ShortcutController()
         guard controller.keyAction(keyCode: 48, flags: []) == nil,
               controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskControl]) == nil,
-              controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift])
-                == .begin(currentAppOnly: false, reverse: true),
-              controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == .step(-1),
+              controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == nil,
+              controller.keyAction(keyCode: 48, flags: .maskCommand) == .begin(currentAppOnly: false),
+              controller.reverseShiftAction(flags: [.maskCommand, .maskShift], pressedShift: true) == .step(-1),
+              controller.reverseShiftAction(flags: [.maskCommand, .maskShift], pressedShift: false) == nil,
+              controller.reverseShiftAction(flags: .maskShift, pressedShift: true) == nil,
+              controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == nil,
+              controller.keyAction(keyCode: 48, flags: .maskCommand) == .step(1),
               controller.keyAction(keyCode: 50, flags: .maskCommand) == .step(1),
               controller.modifierAction(flags: [.maskCommand, .maskShift]) == nil,
               controller.modifierAction(flags: .maskShift) == .commit,
-              controller.keyAction(keyCode: 50, flags: .maskCommand)
-                == .begin(currentAppOnly: true, reverse: false),
+              controller.keyAction(keyCode: 50, flags: .maskCommand) == .begin(currentAppOnly: true),
               controller.keyAction(keyCode: 53, flags: .maskCommand) == .cancel else { return false }
 
         let custom = KeyboardShortcut(keyCode: 16, modifiers: [.maskControl, .maskAlternate], keyLabel: "Y")
         let sameKey = KeyboardShortcut(keyCode: 16, modifiers: .maskCommand, keyLabel: "Y")
+        let customReverse = KeyboardShortcut(keyCode: 16,
+                                             modifiers: [.maskCommand, .maskAlternate, .maskShift], keyLabel: "Y")
         guard custom.isValid, custom.display == "⌃⌥Y", !custom.conflicts(with: sameKey),
-              !KeyboardShortcut(keyCode: 16, modifiers: [], keyLabel: "Y").isValid,
-              !KeyboardShortcut(keyCode: 16, modifiers: [.maskCommand, .maskShift], keyLabel: "Y").isValid,
-              !KeyboardShortcut(keyCode: 53, modifiers: .maskCommand, keyLabel: "Esc").isValid else { return false }
-        controller.configure(allWindows: custom, currentApp: sameKey)
+              customReverse.isValid(allowingShift: true), customReverse.display == "⌥⌘⇧Y",
+              !custom.conflicts(with: customReverse), !sameKey.conflicts(with: customReverse),
+              KeyboardShortcut.reverse.conflicts(with: KeyboardShortcut(
+                  keyCode: 56, modifiers: .maskCommand, keyLabel: "⇧")) else { return false }
+        controller.configure(allWindows: custom, currentApp: sameKey, reverse: customReverse)
         guard controller.keyAction(keyCode: 48, flags: .maskCommand) == nil,
               controller.keyAction(keyCode: 50, flags: .maskCommand) == nil,
               controller.keyAction(keyCode: 16, flags: .maskControl) == nil,
-              controller.keyAction(keyCode: 16, flags: [.maskControl, .maskAlternate, .maskShift])
-                == .begin(currentAppOnly: false, reverse: true),
+              controller.keyAction(keyCode: 16, flags: customReverse.modifiers) == nil,
+              controller.keyAction(keyCode: 16, flags: custom.modifiers) == .begin(currentAppOnly: false),
+              controller.keyAction(keyCode: 16, flags: customReverse.modifiers) == .step(-1),
               controller.keyAction(keyCode: 16, flags: custom.modifiers) == .step(1),
-              controller.keyAction(keyCode: 48, flags: [.maskControl, .maskAlternate, .maskShift]) == .step(-1),
+              controller.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == nil,
+              controller.reverseShiftAction(flags: [.maskCommand, .maskShift], pressedShift: true) == nil,
               controller.keyAction(keyCode: 126, flags: custom.modifiers) == .step(-1),
               controller.keyAction(keyCode: 125, flags: custom.modifiers) == .step(1),
               controller.keyAction(keyCode: 0, flags: custom.modifiers) == nil,
               controller.modifierAction(flags: [.maskControl, .maskAlternate, .maskShift]) == nil,
               controller.modifierAction(flags: .maskControl) == .commit,
-              controller.keyAction(keyCode: 16, flags: .maskCommand)
-                == .begin(currentAppOnly: true, reverse: false),
+              controller.keyAction(keyCode: 16, flags: .maskCommand) == .begin(currentAppOnly: true),
               controller.modifierAction(flags: []) == .commit else { return false }
         controller.canBegin = { _ in false }
         guard controller.keyAction(keyCode: 16, flags: custom.modifiers) == nil else { return false }
@@ -396,10 +500,12 @@ final class ShortcutController: ObservableObject {
         guard controller.keyAction(keyCode: 16, flags: custom.modifiers) != nil else { return false }
         var cancelled = false
         controller.onAction = { cancelled = $0 == .cancel }
-        controller.configure(allWindows: .allWindows, currentApp: .currentApp)
+        controller.configure(allWindows: .allWindows, currentApp: .currentApp, reverse: .reverse)
         guard cancelled, controller.modifierAction(flags: []) == nil else { return false }
-        controller.configure(allWindows: .allWindows, currentApp: .allWindows)
+        controller.configure(allWindows: .allWindows, currentApp: .allWindows, reverse: .reverse)
         guard controller.currentAppShortcut == .currentApp else { return false }
+        controller.configure(allWindows: .allWindows, currentApp: .currentApp, reverse: .allWindows)
+        guard controller.reverseShortcut == .reverse else { return false }
 
         guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
                                           modifierFlags: [.control, .option], timestamp: 0,
@@ -411,20 +517,20 @@ final class ShortcutController: ObservableObject {
 
         var acceptRecording = false
         var saved: KeyboardShortcut?
-        controller.beginRecording(currentAppOnly: false) { shortcut in
+        controller.beginRecording(scope: .allWindows) { shortcut in
             guard acceptRecording else { return false }
             saved = shortcut
             return true
         }
         defer { controller.cancelRecording() }
         controller.record(event)
-        guard controller.recordingCurrentAppOnly == false,
-              controller.recordingErrorKey == "The two shortcuts must be different.", saved == nil else { return false }
+        guard controller.recordingScope == .allWindows,
+              controller.recordingErrorKey == "The shortcuts must be different.", saved == nil else { return false }
         acceptRecording = true
         controller.record(event)
-        guard saved == recorded, controller.recordingCurrentAppOnly == nil,
+        guard saved == recorded, controller.recordingScope == nil,
               controller.recordingMonitor == nil, controller.recordingErrorKey == nil else { return false }
-        controller.beginRecording(currentAppOnly: true) { _ in false }
+        controller.beginRecording(scope: .currentApp) { _ in false }
         guard let invalid = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
                                             windowNumber: 0, context: nil, characters: "y",
                                             charactersIgnoringModifiers: "y", isARepeat: false, keyCode: 16),
@@ -432,34 +538,64 @@ final class ShortcutController: ObservableObject {
                                            windowNumber: 0, context: nil, characters: "\u{1b}",
                                            charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else { return false }
         controller.record(invalid)
-        guard controller.recordingCurrentAppOnly == true, controller.recordingErrorKey != nil else { return false }
+        guard controller.recordingScope == .currentApp, controller.recordingErrorKey != nil else { return false }
         controller.record(escape)
-        guard controller.recordingCurrentAppOnly == nil, controller.recordingMonitor == nil,
+        guard controller.recordingScope == nil, controller.recordingMonitor == nil,
               controller.recordingErrorKey == nil else { return false }
+
+        guard let shiftPress = NSEvent.keyEvent(with: .flagsChanged, location: .zero,
+                                                modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0,
+                                                context: nil, characters: "", charactersIgnoringModifiers: "",
+                                                isARepeat: false, keyCode: 56),
+              let shiftTab = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                              modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0,
+                                              context: nil, characters: "\t", charactersIgnoringModifiers: "\t",
+                                              isARepeat: false, keyCode: 48) else { return false }
+        // Shift belongs to the reverse key alone: neither a tap nor a Shift combination records elsewhere.
+        controller.beginRecording(scope: .allWindows) { _ in true }
+        controller.record(shiftPress)
+        controller.record(shiftTab)
+        guard controller.recordingScope == .allWindows, controller.recordingErrorKey != nil else { return false }
+        controller.cancelRecording()
+        var savedReverse: KeyboardShortcut?
+        controller.beginRecording(scope: .reverse) { shortcut in
+            savedReverse = shortcut
+            return true
+        }
+        controller.record(shiftPress)
+        guard savedReverse == .reverse, controller.recordingScope == nil,
+              controller.recordingErrorKey == nil else { return false }
+        controller.beginRecording(scope: .reverse) { shortcut in
+            savedReverse = shortcut
+            return true
+        }
+        controller.record(shiftTab)
+        guard savedReverse == KeyboardShortcut(keyCode: 48, modifiers: [.maskCommand, .maskShift], keyLabel: "Tab"),
+              controller.recordingScope == nil, controller.recordingErrorKey == nil else { return false }
 
         let searchController = ShortcutController()
         guard searchController.keyAction(keyCode: 13, flags: .maskCommand, characters: "w") == nil,
-              searchController.keyAction(keyCode: 48, flags: .maskCommand)
-                == .begin(currentAppOnly: false, reverse: false),
+              searchController.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == nil,
+              searchController.keyAction(keyCode: 48, flags: .maskCommand) == .begin(currentAppOnly: false),
               searchController.keyAction(keyCode: 13, flags: .maskCommand, characters: "w") == .search("w"),
               searchController.keyAction(keyCode: 12, flags: .maskCommand, characters: "q") == .search("wq"),
               searchController.keyAction(keyCode: 8, flags: .maskCommand, characters: "C") == .search("wqC"),
               searchController.keyAction(keyCode: 49, flags: .maskCommand, characters: " ") == .search("wqC "),
               searchController.keyAction(keyCode: 51, flags: .maskCommand) == .search("wqC"),
-              searchController.keyAction(keyCode: 48, flags: [.maskCommand, .maskShift]) == .step(-1),
+              searchController.reverseShiftAction(flags: [.maskCommand, .maskShift], pressedShift: true) == .step(-1),
               searchController.keyAction(keyCode: 0, flags: .maskCommand, characters: "中") == nil,
               searchController.keyAction(keyCode: 122, flags: .maskCommand, characters: "\u{f704}") == nil,
               searchController.modifierAction(flags: []) == .commit,
               searchController.state.searchQuery.isEmpty,
-              searchController.keyAction(keyCode: 48, flags: .maskCommand)
-                == .begin(currentAppOnly: false, reverse: false),
+              searchController.keyAction(keyCode: 48, flags: .maskCommand) == .begin(currentAppOnly: false),
               searchController.keyAction(keyCode: 51, flags: .maskCommand) == .search(""),
               searchController.keyAction(keyCode: 0, flags: .maskCommand, characters: "a") == .search("a"),
               searchController.keyAction(keyCode: 53, flags: .maskCommand) == .cancel,
               searchController.state.searchQuery.isEmpty else { return false }
-        searchController.configure(allWindows: custom, currentApp: sameKey)
-        guard searchController.keyAction(keyCode: 16, flags: custom.modifiers)
-                == .begin(currentAppOnly: false, reverse: false),
+        searchController.configure(allWindows: custom, currentApp: sameKey, reverse: .reverse)
+        guard searchController.keyAction(keyCode: 16, flags: custom.modifiers) == .begin(currentAppOnly: false),
+              searchController.reverseShiftAction(flags: [.maskControl, .maskAlternate, .maskShift],
+                                                  pressedShift: true) == nil,
               searchController.keyAction(keyCode: 0, flags: custom.modifiers, characters: "a") == .search("a"),
               searchController.keyAction(keyCode: 16, flags: custom.modifiers, characters: "y") == .search("ay"),
               searchController.modifierAction(flags: .maskControl) == .commit,

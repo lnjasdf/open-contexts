@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reverse switching has its own shortcut, recorded in Settings under Shortcuts as “Reverse switch” (default: hold `⌘` and tap `⇧`); `Shift` combined with the switcher keys no longer plays that role, though a Shift combination can still be recorded as the reverse key.
+- The reverse switch key only steps one window back while a switcher is already open, so it no longer opens the switcher on the last window.
+
 ## [0.4.1] - 2026-10-13
 
 ### Added

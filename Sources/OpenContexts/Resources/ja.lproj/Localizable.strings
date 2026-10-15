@@ -49,9 +49,12 @@
 "Move group to end" = "グループを最後に移動";
 "Press shortcut…" = "ショートカットを押す…";
 "Restore defaults" = "デフォルトに戻す";
-"Click a shortcut to record. Esc cancels; Shift switches backward." = "クリックして入力。Esc で取消、Shift で逆方向に切替。";
-"The two shortcuts must be different." = "2 つのショートカットは異なる必要があります。";
-"Use Command, Option or Control with a key; Shift is reserved for reverse switching." = "Command、Option、Control とキーを組み合わせてください。Shift は逆方向の切替用です。";
+"Reverse switch" = "逆方向に切替";
+"Click a shortcut to record. Esc cancels." = "クリックして入力。Esc で取消。";
+"The reverse key steps one window back inside a switcher that is already open; it never opens one." = "逆方向のキーは、表示中のセレクター内で 1 つ前のウインドウに移ります。表示は開始しません。";
+"The shortcuts must be different." = "ショートカットは互いに異なる必要があります。";
+"Use Command, Option, or Control with a key." = "Command、Option、Control とキーを組み合わせてください。";
+"Use Command, Option, Control, or Shift with a key." = "Command、Option、Control、Shift のいずれかとキーを組み合わせてください。";
 "Type an app name or window title" = "アプリ名またはウインドウのタイトルを入力";
 "Window search" = "ウインドウ検索";
 "%@ windows" = "%@ 個のウインドウ";

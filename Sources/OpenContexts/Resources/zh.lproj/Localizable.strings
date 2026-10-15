@@ -49,9 +49,12 @@
 "Move group to end" = "移动分组到末尾";
 "Press shortcut…" = "请按快捷键…";
 "Restore defaults" = "恢复默认";
-"Click a shortcut to record. Esc cancels; Shift switches backward." = "点击快捷键开始录入，Esc 取消，Shift 反向切换。";
-"The two shortcuts must be different." = "两个快捷键不能相同。";
-"Use Command, Option or Control with a key; Shift is reserved for reverse switching." = "请使用 Command、Option 或 Control 搭配按键；Shift 用于反向切换。";
+"Reverse switch" = "反向切换";
+"Click a shortcut to record. Esc cancels." = "点击快捷键开始录入，Esc 取消。";
+"The reverse key steps one window back inside a switcher that is already open; it never opens one." = "反向切换键只在已打开的切换列表中后退一个窗口，不会打开列表。";
+"The shortcuts must be different." = "快捷键之间不能相同。";
+"Use Command, Option, or Control with a key." = "请使用 Command、Option 或 Control 搭配按键。";
+"Use Command, Option, Control, or Shift with a key." = "请使用 Command、Option、Control 或 Shift 搭配按键。";
 "Type an app name or window title" = "输入应用名或窗口标题";
 "Window search" = "窗口搜索";
 "%@ windows" = "%@ 个窗口";
